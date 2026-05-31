@@ -413,10 +413,10 @@ TEMPLATE = """<!DOCTYPE html>
   /* ---- daily ---- */
   .day-row {
     display: grid;
-    grid-template-columns: 80px 1.6rem 1fr 70px;
+    grid-template-columns: 85px 1.5rem 1fr 70px;
     align-items: center;
     gap: 8px;
-    padding: 10px 14px;
+    padding: 10px 10px;
     border-bottom: 1px solid var(--border);
     font-size: .88rem;
   }
@@ -446,7 +446,7 @@ TEMPLATE = """<!DOCTYPE html>
     background: #0d1b2a;
     border: 1px solid var(--border);
     border-radius: 10px;
-    padding: 10px 6px;
+    padding: 10px 0px;
     text-align: center;
     font-family: var(--mono);
   }
@@ -586,7 +586,7 @@ TEMPLATE = """<!DOCTYPE html>
         <div class="hour-emoji">{{ h.weather.emoji }}</div>
         <div class="hour-temp">{{ h.temp | round(1) }}°</div>
         <div class="hour-wind">
-          <span class="{{ wc(h.wind) }}">{{ h.wind_dir }} {{ h.wind | round(0) | int }}</span>↑<span class="{{ wc(h.gusts) }}">{{ h.gusts | round(0) | int }}</span> k
+          <span class="{{ wc(h.wind) }}">{{ h.wind_dir }} {{ h.wind | round(0) | int }}</span>↑<span class="{{ wc(h.gusts) }}">{{ h.gusts | round(0) | int }}</span>kph
         </div>
         <div class="hour-cloud">☁ {{ h.cloud }}%</div>
         <div class="hour-hum">💧{{ h.humidity }}%{% if h.precip_prob is not none and h.precip_prob > 0 %} 🌂{{ h.precip_prob }}%{% endif %}</div>
@@ -622,7 +622,7 @@ app = Flask(__name__)
 _cache: DataCache = None
 _args  = None
 
-@app.route("/")
+@app.route("/weather")
 def index():
     data = _cache.get()
     resp = render_template_string(

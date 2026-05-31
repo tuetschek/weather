@@ -111,7 +111,7 @@ def fetch_weather(lat, lon):
         "hourly": [
             "temperature_2m", "relative_humidity_2m", "weather_code",
             "wind_speed_10m", "wind_gusts_10m", "wind_direction_10m",
-            "cloud_cover",
+            "cloud_cover", "precipitation_probability",
         ],
         "daily": [
             "temperature_2m_max", "temperature_2m_min", "weather_code",
@@ -211,24 +211,26 @@ def process(weather_raw, aqi_raw):
                 found_now = True
         if found_now and len(hours) < 13:
             aqi_val = ha.get("european_aqi", [None]*len(times))[i] if i < len(ha.get("european_aqi",[])) else None
+            precip_list = h.get("precipitation_probability", [])
             hours.append({
-                "time":     t[11:16],   # HH:MM
-                "temp":     h["temperature_2m"][i],
-                "humidity": h["relative_humidity_2m"][i],
-                "wind":     h["wind_speed_10m"][i],
-                "gusts":    h["wind_gusts_10m"][i],
-                "wind_dir": deg_to_compass(h["wind_direction_10m"][i]),
-                "cloud":    h["cloud_cover"][i],
-                "weather":  wmo_label(h["weather_code"][i]),
-                "aqi":      aqi_val,
-                "aqi_label": aqi_label(aqi_val),
+                "time":       t[11:16],   # HH:MM
+                "temp":       h["temperature_2m"][i],
+                "humidity":   h["relative_humidity_2m"][i],
+                "wind":       h["wind_speed_10m"][i],
+                "gusts":      h["wind_gusts_10m"][i],
+                "wind_dir":   deg_to_compass(h["wind_direction_10m"][i]),
+                "cloud":      h["cloud_cover"][i],
+                "precip_prob": precip_list[i] if i < len(precip_list) else None,
+                "weather":    wmo_label(h["weather_code"][i]),
+                "aqi":        aqi_val,
+                "aqi_label":  aqi_label(aqi_val),
             })
 
     return {
         "current": current,
         "daily":   days,
         "hourly":  hours,
-        "fetched_at": datetime.now().strftime("%H:%M:%S"),
+        "fetched_at": current_time_str[11:16],  # HH:MM from API's local time
         "timezone": weather_raw.get("timezone_abbreviation", ""),
     }
 
@@ -496,7 +498,6 @@ TEMPLATE = """<!DOCTYPE html>
 <main>
 
   {# ---- CURRENT ---- #}
-  {% macro wind_color(spd) %}{% if spd is none %}wind-calm{% elif spd >= 40 %}wind-red{% elif spd >= 30 %}wind-orange{% elif spd >= 20 %}wind-yellow{% else %}wind-calm{% endif %}{% endmacro %}
   {% set c = data.current %}
   <div class="card">
     <div class="section-title">Current Conditions</div>
@@ -510,8 +511,8 @@ TEMPLATE = """<!DOCTYPE html>
     <div class="cur-grid">
       <div class="cur-cell">
         <div class="cell-label">Wind</div>
-        <div class="cell-val {{ wind_color(c.wind) }}">{{ c.wind | round(1) }} kph</div>
-        <div class="cell-sub {{ wind_color(c.gusts) }}">Gusts {{ c.gusts | round(1) }} kph</div>
+        <div class="cell-val {{ wc(c.wind) }}">{{ c.wind | round(1) }} kph</div>
+        <div class="cell-sub {{ wc(c.gusts) }}">Gusts {{ c.gusts | round(1) }} kph</div>
       </div>
       <div class="cur-cell">
         <div class="cell-label">Direction</div>
@@ -555,7 +556,9 @@ TEMPLATE = """<!DOCTYPE html>
     <div class="day-row">
       <div>
         <div class="day-name">{{ day.day_name }}</div>
-        <div class="day-wind {{ wind_color(day.wind_max) }}">{{ day.wind_dir }} {{ day.wind_max | round(0) | int }}↑{{ day.gust_max | round(0) | int }} kph</div>
+        <div class="day-wind">
+          <span class="{{ wc(day.wind_max) }}">{{ day.wind_dir }} {{ day.wind_max | round(0) | int }}</span>↑<span class="{{ wc(day.gust_max) }}">{{ day.gust_max | round(0) | int }}</span> kph
+        </div>
       </div>
       <div class="day-emoji">{{ day.weather.emoji }}</div>
       <div>
@@ -582,10 +585,11 @@ TEMPLATE = """<!DOCTYPE html>
         <div class="hour-time">{% if loop.index0 == 0 %}Now{% else %}{{ h.time }}{% endif %}</div>
         <div class="hour-emoji">{{ h.weather.emoji }}</div>
         <div class="hour-temp">{{ h.temp | round(1) }}°</div>
-        <div class="hour-wind {{ wind_color(h.wind) }}">{{ h.wind_dir }} {{ h.wind | round(0) | int }}</div>
-        <div class="hour-wind {{ wind_color(h.gusts) }}" style="font-size:.63rem;">↑{{ h.gusts | round(0) | int }} kph</div>
+        <div class="hour-wind">
+          <span class="{{ wc(h.wind) }}">{{ h.wind_dir }} {{ h.wind | round(0) | int }}</span>↑<span class="{{ wc(h.gusts) }}">{{ h.gusts | round(0) | int }}</span> k
+        </div>
         <div class="hour-cloud">☁ {{ h.cloud }}%</div>
-        <div class="hour-hum">💧{{ h.humidity }}%</div>
+        <div class="hour-hum">💧{{ h.humidity }}%{% if h.precip_prob is not none and h.precip_prob > 0 %} 🌂{{ h.precip_prob }}%{% endif %}</div>
       </div>
       {% endfor %}
     </div>
@@ -602,6 +606,18 @@ TEMPLATE = """<!DOCTYPE html>
 # Flask app
 # ---------------------------------------------------------------------------
 
+def wind_color(spd):
+    """Return a CSS class name based on wind speed in kph."""
+    if spd is None:
+        return "wind-calm"
+    if spd >= 40:
+        return "wind-red"
+    if spd >= 30:
+        return "wind-orange"
+    if spd >= 20:
+        return "wind-yellow"
+    return "wind-calm"
+
 app = Flask(__name__)
 _cache: DataCache = None
 _args  = None
@@ -615,6 +631,7 @@ def index():
         lat=_args.lat,
         lon=_args.lon,
         cache_ttl=_args.cache,
+        wc=wind_color,
     )
 
 # ---------------------------------------------------------------------------

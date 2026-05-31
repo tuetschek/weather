@@ -9,7 +9,7 @@ Usage:
 import argparse
 import time
 import threading
-from datetime import datetime, timezone
+from datetime import datetime
 
 import requests
 from flask import Flask, render_template_string
@@ -116,8 +116,9 @@ def fetch_weather(lat, lon):
         "daily": [
             "temperature_2m_max", "temperature_2m_min", "weather_code",
             "wind_speed_10m_max", "wind_gusts_10m_max", "wind_direction_10m_dominant",
+            "precipitation_probability_max", "precipitation_sum",
         ],
-        "wind_speed_unit": "mph",
+        "wind_speed_unit": "kmh",
         "timezone": "auto",
         "forecast_days": 3,
     }
@@ -129,7 +130,7 @@ def fetch_aqi(lat, lon):
     params = {
         "latitude": lat,
         "longitude": lon,
-        "current": ["european_aqi"],
+        "current": ["european_aqi", "pm2_5", "pm10", "ozone"],
         "hourly": ["european_aqi"],
         "timezone": "auto",
         "forecast_days": 2,
@@ -142,9 +143,9 @@ def fetch_aqi(lat, lon):
 # Data processing
 # ---------------------------------------------------------------------------
 
-def process(weather_raw, aqi_raw):
-    now_utc = datetime.now(timezone.utc)
+WEEKDAYS = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
 
+def process(weather_raw, aqi_raw):
     # ---- current ----------------------------------------------------------
     c = weather_raw["current"]
     aqi_cur = aqi_raw.get("current", {})
@@ -162,41 +163,51 @@ def process(weather_raw, aqi_raw):
         "weather":    wmo_cur,
         "aqi":        aqi_cur.get("european_aqi"),
         "aqi_label":  aqi_label(aqi_cur.get("european_aqi")),
+        "pm25":       aqi_cur.get("pm2_5"),
+        "pm10":       aqi_cur.get("pm10"),
+        "o3":         aqi_cur.get("ozone"),
     }
 
     # ---- daily ------------------------------------------------------------
     d = weather_raw.get("daily", {})
     days = []
     for i, date_str in enumerate(d.get("time", [])):
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        if i == 0:
+            day_name = "Today"
+        elif i == 1:
+            day_name = "Tomorrow"
+        else:
+            day_name = WEEKDAYS[dt.weekday()]
         days.append({
             "date":      date_str,
+            "day_name":  day_name,
             "temp_max":  d["temperature_2m_max"][i],
             "temp_min":  d["temperature_2m_min"][i],
             "weather":   wmo_label(d["weather_code"][i]),
             "wind_max":  d["wind_speed_10m_max"][i],
             "gust_max":  d["wind_gusts_10m_max"][i],
             "wind_dir":  deg_to_compass(d["wind_direction_10m_dominant"][i]),
+            "precip_prob": d.get("precipitation_probability_max", [None]*len(d["time"]))[i],
+            "precip_sum":  d.get("precipitation_sum", [None]*len(d["time"]))[i],
         })
 
     # ---- hourly (next 12 h) -----------------------------------------------
+    # Open-Meteo returns local-time strings when timezone=auto.
+    # Use the API's own current.time as the "now" anchor — it's already local.
+    current_time_str = c.get("time", "")   # e.g. "2024-05-31T14:00"
+    # Round down to hour boundary so we match hourly slots exactly
+    now_hour_str = current_time_str[:13] + ":00"   # "YYYY-MM-DDTHH:00"
+
     h = weather_raw.get("hourly", {})
     ha = aqi_raw.get("hourly", {})
     times = h.get("time", [])
 
-    # parse ISO times; API returns local time strings (tz=auto)
     hours = []
     found_now = False
     for i, t in enumerate(times):
-        dt = datetime.fromisoformat(t)
-        # make timezone-aware if needed
-        if dt.tzinfo is None:
-            # server gave naive local time; just compare string-wise hour
-            pass
         if not found_now:
-            # find first hour >= now (compare naively by index position heuristic)
-            # Open-Meteo returns times in local tz; find first that is close to now
-            now_str = now_utc.strftime("%Y-%m-%dT%H:00")
-            if t >= now_str:
+            if t >= now_hour_str:
                 found_now = True
         if found_now and len(hours) < 13:
             aqi_val = ha.get("european_aqi", [None]*len(times))[i] if i < len(ha.get("european_aqi",[])) else None
@@ -372,12 +383,18 @@ TEMPLATE = """<!DOCTYPE html>
   .cell-val { font-size: 1.05rem; font-family: var(--mono); font-weight: 500; margin-top: 2px; }
   .cell-sub { font-size: .72rem; color: var(--muted); margin-top: 1px; }
 
-  /* wind arrow */
+  /* wind arrow — points INTO the direction wind comes FROM (add 180° to meteorological "blows toward") */
   .wind-arrow {
     display: inline-block;
     font-size: .9em;
     transition: transform .3s;
   }
+
+  /* wind speed colors */
+  .wind-calm   { color: var(--muted); }
+  .wind-yellow { color: #fbbf24; }
+  .wind-orange { color: #f97316; }
+  .wind-red    { color: #ef4444; font-weight: 600; }
 
   /* aqi pill */
   .aqi-pill {
@@ -409,6 +426,7 @@ TEMPLATE = """<!DOCTYPE html>
   .temp-max { color: var(--yellow); }
   .temp-min { color: var(--muted); font-size: .78rem; }
   .day-wind { color: var(--muted); font-size: .75rem; margin-top: 1px; }
+  .day-precip { color: var(--accent2); font-size: .72rem; margin-top: 2px; }
   .day-detail { grid-column: 3 / 5; }
 
   /* ---- hourly ---- */
@@ -478,6 +496,7 @@ TEMPLATE = """<!DOCTYPE html>
 <main>
 
   {# ---- CURRENT ---- #}
+  {% macro wind_color(spd) %}{% if spd is none %}wind-calm{% elif spd >= 40 %}wind-red{% elif spd >= 30 %}wind-orange{% elif spd >= 20 %}wind-yellow{% else %}wind-calm{% endif %}{% endmacro %}
   {% set c = data.current %}
   <div class="card">
     <div class="section-title">Current Conditions</div>
@@ -491,13 +510,14 @@ TEMPLATE = """<!DOCTYPE html>
     <div class="cur-grid">
       <div class="cur-cell">
         <div class="cell-label">Wind</div>
-        <div class="cell-val">{{ c.wind | round(1) }} mph</div>
-        <div class="cell-sub">Gusts {{ c.gusts | round(1) }} mph</div>
+        <div class="cell-val {{ wind_color(c.wind) }}">{{ c.wind | round(1) }} kph</div>
+        <div class="cell-sub {{ wind_color(c.gusts) }}">Gusts {{ c.gusts | round(1) }} kph</div>
       </div>
       <div class="cur-cell">
         <div class="cell-label">Direction</div>
         <div class="cell-val">{{ c.wind_dir }}
-          <span class="wind-arrow" style="transform:rotate({{ c.wind_deg }}deg)">↑</span>
+          {# Arrow points toward origin: wind FROM NW means arrow points NW, so rotate = deg + 180 #}
+          <span class="wind-arrow" style="transform:rotate({{ (c.wind_deg + 180) % 360 }}deg)">↑</span>
         </div>
         <div class="cell-sub">{{ c.wind_deg }}°</div>
       </div>
@@ -519,6 +539,11 @@ TEMPLATE = """<!DOCTYPE html>
             <span class="aqi-pill" style="background:{{ c.aqi_label[1] }}">{{ c.aqi_label[0] }}</span>
           {% else %}—{% endif %}
         </div>
+        <div class="cell-sub" style="margin-top:5px; display:flex; gap:12px; flex-wrap:wrap;">
+          <span>PM2.5: <b>{{ "%.1f"|format(c.pm25) if c.pm25 is not none else "—" }} µg/m³</b></span>
+          <span>PM10: <b>{{ "%.1f"|format(c.pm10) if c.pm10 is not none else "—" }} µg/m³</b></span>
+          <span>O₃: <b>{{ "%.1f"|format(c.o3) if c.o3 is not none else "—" }} µg/m³</b></span>
+        </div>
       </div>
     </div>
   </div>
@@ -527,19 +552,19 @@ TEMPLATE = """<!DOCTYPE html>
   <div class="card">
     <div class="section-title">Daily Forecast</div>
     {% for day in data.daily %}
-    {% set dow = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"] %}
-    {% set dt = day.date %}
     <div class="day-row">
       <div>
-        <div class="day-name">
-          {% if loop.index0 == 0 %}Today
-          {% elif loop.index0 == 1 %}Tomorrow
-          {% else %}{{ dt }}{% endif %}
-        </div>
-        <div class="day-wind">{{ day.wind_dir }} {{ day.wind_max | round(0) | int }}↑{{ day.gust_max | round(0) | int }} mph</div>
+        <div class="day-name">{{ day.day_name }}</div>
+        <div class="day-wind {{ wind_color(day.wind_max) }}">{{ day.wind_dir }} {{ day.wind_max | round(0) | int }}↑{{ day.gust_max | round(0) | int }} kph</div>
       </div>
       <div class="day-emoji">{{ day.weather.emoji }}</div>
-      <div class="day-label">{{ day.weather.label }}</div>
+      <div>
+        <div class="day-label">{{ day.weather.label }}</div>
+        <div class="day-precip">
+          {% if day.precip_prob is not none %}🌂{{ day.precip_prob }}%{% endif %}
+          {% if day.precip_sum is not none and day.precip_sum > 0 %} · {{ "%.1f"|format(day.precip_sum) }}mm{% endif %}
+        </div>
+      </div>
       <div class="day-temps">
         <div class="temp-max">{{ day.temp_max | round(1) }}°</div>
         <div class="temp-min">{{ day.temp_min | round(1) }}°</div>
@@ -557,7 +582,8 @@ TEMPLATE = """<!DOCTYPE html>
         <div class="hour-time">{% if loop.index0 == 0 %}Now{% else %}{{ h.time }}{% endif %}</div>
         <div class="hour-emoji">{{ h.weather.emoji }}</div>
         <div class="hour-temp">{{ h.temp | round(1) }}°</div>
-        <div class="hour-wind">{{ h.wind_dir }} {{ h.wind | round(0) | int }}mph</div>
+        <div class="hour-wind {{ wind_color(h.wind) }}">{{ h.wind_dir }} {{ h.wind | round(0) | int }}</div>
+        <div class="hour-wind {{ wind_color(h.gusts) }}" style="font-size:.63rem;">↑{{ h.gusts | round(0) | int }} kph</div>
         <div class="hour-cloud">☁ {{ h.cloud }}%</div>
         <div class="hour-hum">💧{{ h.humidity }}%</div>
       </div>

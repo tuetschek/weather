@@ -12,7 +12,7 @@ import threading
 from datetime import datetime
 
 import requests
-from flask import Flask, render_template_string
+from flask import Flask, make_response, render_template_string
 from logzero import logger, loglevel
 import logzero
 
@@ -625,7 +625,7 @@ _args  = None
 @app.route("/")
 def index():
     data = _cache.get()
-    return render_template_string(
+    resp = render_template_string(
         TEMPLATE,
         data=data,
         lat=_args.lat,
@@ -633,6 +633,10 @@ def index():
         cache_ttl=_args.cache,
         wc=wind_color,
     )
+    r = make_response(resp)
+    remaining = max(0, int(_args.cache - (time.time() - _cache._ts)))
+    r.headers["Cache-Control"] = f"private, max-age={remaining}"
+    return r
 
 # ---------------------------------------------------------------------------
 # Entry point
